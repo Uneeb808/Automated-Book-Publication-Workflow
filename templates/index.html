@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Content Scraper & AI Editor</title>
+    <style>
+        body { font-family: Arial; margin: 40px; }
+        input, button, textarea { padding: 8px; font-size: 1em; }
+        textarea { width: 100%; margin-top: 10px; }
+        #inputText, #outputText, #rollbackText { height: 300px; width: 100%; }
+        .section { margin-top: 40px; }
+        .error { color: red; margin-top: 10px; }
+        .success { color: green; }
+        .chat-log {
+            background: #f4f4f4; border: 1px solid #ccc;
+            padding: 10px; height: 200px;
+            overflow-y: auto; white-space: pre-wrap;
+        }
+        .chat-input {
+            display: flex; gap: 10px; margin-top: 10px;
+        }
+        .chat-input input { flex: 1; }
+    </style>
+</head>
+<body>
+
+    <h2>📘 Enter a URL or Upload an Image to Extract Content</h2>
+
+    <form method="POST" enctype="multipart/form-data">
+        <input type="text" name="url" placeholder="Enter URL here..." value="{{ url }}">
+        <br><br>
+        <input type="file" name="image" accept="image/*">
+        <br><br>
+        <button type="submit">Scrape / Extract</button>
+    </form>
+
+    {% if title %}
+        <h3 class="success">✅ Title: {{ title }}</h3>
+        <textarea readonly>{{ content }}</textarea>
+    {% elif content %}
+        <p class="error">{{ content }}</p>
+    {% endif %}
+
+    {% if doc_link %}
+        <p>📄 <a href="{{ doc_link }}" download>Download .txt version</a></p>
+    {% endif %}
+
+    {% if content %}
+    <div class="section">
+        <h3>✨ AI Rewrite / Chapter Spin</h3>
+        <textarea id="inputText">{{ content }}</textarea>
+        <br>
+        <button onclick="spinWithAI()">🔁 Spin with AI</button>
+        <button onclick="rollbackVersion()">⏪ Restore Last Version</button>
+        <br><br>
+        <label><b>📝 Rewritten Version:</b></label>
+        <textarea id="outputText" placeholder="AI rewritten chapter will appear here..."></textarea>
+
+        <label><b>📂 Last Saved Version (Before Spin):</b></label>
+        <textarea id="rollbackText" placeholder="⬅️ Last version before spin will appear here..."></textarea>
+
+        <div id="errorBox" class="error"></div>
+    </div>
+    {% endif %}
+
+    <div class="section">
+        <h3>💬 Chat with AI Editor</h3>
+        <div class="chat-log" id="chatLog"></div>
+        <div class="chat-input">
+            <input type="text" id="chatMessage" placeholder="Ask AI to edit, rewrite, explain, etc...">
+            <button onclick="sendChat()">Send</button>
+        </div>
+        <div id="chatError" class="error"></div>
+    </div>
+
+    <script>
+        async function spinWithAI() {
+            const input = document.getElementById("inputText").value;
+            const output = document.getElementById("outputText");
+            const errorBox = document.getElementById("errorBox");
+            output.value = "";
+            errorBox.textContent = "";
+
+            try {
+                const response = await fetch("/spin", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: new URLSearchParams({ content: input })
+                });
+                const data = await response.json();
+                if (data.spun) {
+                    output.value = data.spun;
+                } else {
+                    errorBox.textContent = "❌ " + (data.error || "Unknown error occurred.");
+                }
+            } catch (err) {
+                errorBox.textContent = "❌ Network or server error.";
+            }
+        }
+
+        async function rollbackVersion() {
+            const rollbackBox = document.getElementById("rollbackText");
+            const errorBox = document.getElementById("errorBox");
+            rollbackBox.value = "";
+            errorBox.textContent = "";
+
+            try {
+                const response = await fetch("/rollback");
+                const data = await response.json();
+                if (data.previous) {
+                    rollbackBox.value = data.previous;
+                } else {
+                    errorBox.textContent = "⚠️ " + (data.error || "No version found.");
+                }
+            } catch (err) {
+                errorBox.textContent = "❌ Failed to fetch rollback.";
+            }
+        }
+
+        async function sendChat() {
+            const message = document.getElementById("chatMessage").value.trim();
+            const chatLog = document.getElementById("chatLog");
+            const chatError = document.getElementById("chatError");
+            if (!message) return;
+
+            chatLog.innerHTML += `👤 You: ${message}\n`;
+            document.getElementById("chatMessage").value = "";
+            chatError.textContent = "";
+
+            try {
+                const response = await fetch("/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message })
+                });
+                const data = await response.json();
+                if (data.response) {
+                    chatLog.innerHTML += `🤖 AI: ${data.response}\n`;
+                    chatLog.scrollTop = chatLog.scrollHeight;
+                } else {
+                    chatError.textContent = "❌ " + (data.error || "Unknown error occurred.");
+                }
+            } catch (err) {
+                chatError.textContent = "❌ Network or server error.";
+            }
+        }
+    </script>
+
+</body>
+</html>
