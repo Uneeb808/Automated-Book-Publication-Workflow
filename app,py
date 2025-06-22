@@ -1,0 +1,130 @@
+from flask import Flask, render_template, request, jsonify
+from scraper import fetch_content_with_header
+import pytesseract
+from PIL import Image
+import google.generativeai as genai
+import chromadb
+import os
+import re
+from dotenv import load_dotenv
+
+# Load Gemini API key
+load_dotenv()
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Initialize Flask
+app = Flask(__name__)
+UPLOAD_FOLDER = "uploads"
+TXT_FOLDER = "temp_docs"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(TXT_FOLDER, exist_ok=True)
+
+#  Optimized ChromaDB client with no embeddings
+chroma_client = chromadb.PersistentClient(path="chroma_store")
+collection = chroma_client.get_or_create_collection(name="versions")  # No embedding_function passed
+
+# Gemini model and global state
+model = genai.GenerativeModel("gemini-1.5-flash")
+chat_history = []
+scraped_content = ""
+current_doc_id = "latest_content"
+
+# Spin/Rewrite Function
+def spin_chapter(content):
+    response = model.generate_content(
+        f"Rewrite the following chapter with better clarity, engagement, and literary polish:\n\n{content}"
+    )
+    return response.text.strip()
+
+# Save original version before overwrite
+def save_to_chroma(doc_id, content):
+    collection.upsert(documents=[content], ids=[doc_id])
+
+# Fetch previous version
+def fetch_previous_version(doc_id):
+    results = collection.get(ids=[doc_id])
+    return results["documents"][0] if results["documents"] else ""
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    global scraped_content, current_doc_id
+    title = content = url = ""
+    file_path = ""
+
+    if request.method == "POST":
+        url = request.form.get("url")
+        image = request.files.get("image")
+
+        if url:
+            try:
+                title, content = fetch_content_with_header(url)
+            except Exception as e:
+                content = f"Error scraping URL: {e}"
+                title = "Scraping Failed"
+
+        elif image:
+            img_path = os.path.join(UPLOAD_FOLDER, image.filename)
+            image.save(img_path)
+            content = pytesseract.image_to_string(Image.open(img_path))
+            title = "Extracted from Image"
+
+        if content.strip():
+            scraped_content = content.strip()
+            safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '_')
+            txt_filename = f"{safe_title[:40]}.txt"
+            file_path = os.path.join(TXT_FOLDER, txt_filename)
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(title + "\n\n" + scraped_content)
+
+            # Save version
+            save_to_chroma(current_doc_id, scraped_content)
+
+    return render_template("index.html", title=title, content=content, url=url,
+                           doc_link=file_path if os.path.exists(file_path) else "")
+
+@app.route("/spin", methods=["POST"])
+def spin():
+    text = request.form.get("content", "")
+    if not text.strip():
+        return jsonify({"error": "No content provided"}), 400
+    try:
+        save_to_chroma("last_before_spin", text)  # Save version before modifying
+        result = spin_chapter(text)
+        return jsonify({"spun": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    global chat_history, scraped_content
+    user_msg = request.json.get("message", "").strip()
+    if not user_msg:
+        return jsonify({"error": "Empty message"}), 400
+
+    try:
+        if scraped_content and not any("context" in m.get("parts", [{}])[0] for m in chat_history):
+            chat_history.append({"role": "user", "parts": [f"The following is the content to keep in mind for editing and suggestions:\n\n{scraped_content}"]})
+
+        chat_history.append({"role": "user", "parts": [user_msg]})
+        convo = model.start_chat(history=chat_history)
+        response = convo.send_message(user_msg)
+        chat_history.append({"role": "model", "parts": [response.text]})
+
+        formatted = f"\n\n\n🤖 AI:\n{response.text.strip()}\n"
+        return jsonify({"response": formatted})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/rollback", methods=["GET"])
+def rollback():
+    try:
+        prev = fetch_previous_version("last_before_spin")
+        if not prev:
+            return jsonify({"error": "No previous version found"}), 404
+        return jsonify({"previous": prev})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(debug=True)
